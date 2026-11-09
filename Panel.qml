@@ -38,9 +38,21 @@ Panel {
   property int cursorIndex: 0
   property bool cursorActive: false
   property bool hexFieldFocused: false
+  property bool showHidden: false
+  // Order set in this session; re-applied to refreshes that raced the save.
+  property var localOrder: []
+  // Drag-to-reorder: the device being dragged by its icon, and the row
+  // index of the listed device it would land on.
+  property string dragDeviceId: ""
+  property int dragTarget: -1
 
   readonly property bool showKeyForm: configured === false || editingKey
-  readonly property int onCount: Model.countOn(devices)
+  // Hidden devices stay out of the list (unless shown), the summary, the bar
+  // icon, and "all on/off".
+  readonly property var activeDevices: Model.active(devices)
+  readonly property var listedDevices: Model.listed(devices, showHidden)
+  readonly property int hiddenCount: Model.hiddenCount(devices)
+  readonly property int onCount: Model.countOn(activeDevices)
   readonly property bool anyOn: onCount > 0
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
@@ -56,8 +68,8 @@ Panel {
   readonly property string heroMeta: {
     if (configured === false) return strings.t("summary.noKey")
     if (loading && !loadedOnce) return strings.t("summary.loading")
-    if (devices.length === 0) return strings.tn("summary.devices", 0).arg(0)
-    return strings.t("summary.on").arg(Commons.I18n.formatNumber(onCount)).arg(Commons.I18n.formatNumber(devices.length))
+    if (activeDevices.length === 0) return strings.tn("summary.devices", 0).arg(0)
+    return strings.t("summary.on").arg(Commons.I18n.formatNumber(onCount)).arg(Commons.I18n.formatNumber(activeDevices.length))
   }
 
   implicitWidth: button.implicitWidth
@@ -141,8 +153,8 @@ Panel {
   }
 
   function setAll(on) {
-    for (var i = 0; i < devices.length; i++) {
-      var d = devices[i]
+    for (var i = 0; i < activeDevices.length; i++) {
+      var d = activeDevices[i]
       if (Model.hasPower(d) && Model.isOnline(d) && Model.isOn(d) !== on) setPower(d, on)
     }
   }
@@ -176,11 +188,78 @@ Panel {
     if (expandedDevice !== "" && Model.findCap(dev, "dynamic_scene", "lightScene")) loadScenes(dev)
   }
 
-  function deviceAt(i) { return i >= 0 && i < devices.length ? devices[i] : null }
+  function setDeviceHidden(dev, hidden) {
+    if (!dev) return
+    // Optimistic, like controls: the helper only writes a local file.
+    devices = Model.setHidden(devices, dev.device, hidden)
+    if (hidden && !showHidden && expandedDevice === dev.device) expandedDevice = ""
+    clampCursor()
+    runHelper([hidden ? "hide" : "unhide", dev.device])
+  }
+
+  // Fire-and-forget helper call for local-only writes (hide, order).
+  function runHelper(args) {
+    var proc = helperProcComponent.createObject(root)
+    proc.command = ["python3", "-I", root.script].concat(args)
+    proc.running = true
+  }
+
+  function moveDeviceTo(deviceId, to) {
+    var next = Model.moveDevice(devices, showHidden, deviceId, to)
+    if (next === devices || Model.deviceIds(next).join() === Model.deviceIds(devices).join()) return
+    devices = next
+    localOrder = Model.deviceIds(next)
+    runHelper(["set-order"].concat(localOrder))
+    for (var i = 0; i < listedDevices.length; i++) if (listedDevices[i].device === deviceId) cursorIndex = i
+    scrollCursorIntoView()
+  }
+
+  // Ctrl+Up/Down carries the selected device up or down, cursor and all.
+  function reorderDevice(dy) {
+    var d = deviceAt(cursorIndex)
+    if (!d) return
+    cursorActive = true
+    moveDeviceTo(d.device, cursorIndex + dy)
+  }
+
+  function dragOver(y) {
+    var content = panel.loadedContent
+    if (!content || !content.deviceColumn) return
+    var kids = content.deviceColumn.children
+    for (var i = 0; i < kids.length; i++) {
+      var item = kids[i]
+      if (item.rowIndex === undefined || !item.visible) continue
+      if (y >= item.y && y < item.y + item.height) { dragTarget = item.rowIndex; return }
+    }
+  }
+
+  function dropDevice() {
+    var id = dragDeviceId
+    var to = dragTarget
+    dragDeviceId = ""
+    dragTarget = -1
+    if (id !== "" && to >= 0) moveDeviceTo(id, to)
+  }
+
+  function helperFinished(text) {
+    var result = parse(text)
+    if (!result.ok) {
+      error = String(result.error || strings.t("error.generic"))
+      refreshSoon.restart()
+    }
+  }
+
+  function clampCursor() {
+    if (cursorIndex >= listedDevices.length) cursorIndex = Math.max(0, listedDevices.length - 1)
+  }
+
+  onShowHiddenChanged: clampCursor()
+
+  function deviceAt(i) { return i >= 0 && i < listedDevices.length ? listedDevices[i] : null }
 
   function moveCursor(dy) {
-    if (devices.length === 0) return
-    cursorIndex = Math.max(0, Math.min(devices.length - 1, cursorIndex + dy))
+    if (listedDevices.length === 0) return
+    cursorIndex = Math.max(0, Math.min(listedDevices.length - 1, cursorIndex + dy))
     scrollCursorIntoView()
   }
 
@@ -229,10 +308,10 @@ Panel {
         var result = root.parse(text)
         root.loading = false
         if (result.ok && Array.isArray(result.devices)) {
-          root.devices = result.devices
+          root.devices = root.localOrder.length ? Model.applyOrder(result.devices, root.localOrder) : result.devices
           root.loadedOnce = true
           root.error = ""
-          if (root.cursorIndex >= root.devices.length) root.cursorIndex = Math.max(0, root.devices.length - 1)
+          root.clampCursor()
         } else {
           root.error = String(result.error || strings.t("error.generic"))
           if (result.needsKey) root.configured = false
@@ -293,6 +372,25 @@ Panel {
           root.controlFinished(controlProc.deviceId, text)
           controlProc.streamDone = true
           controlProc.maybeDestroy()
+        }
+      }
+      onExited: { exited = true; maybeDestroy() }
+    }
+  }
+
+  Component {
+    id: helperProcComponent
+    Process {
+      id: helperProc
+      property bool streamDone: false
+      property bool exited: false
+      function maybeDestroy() { if (streamDone && exited) Qt.callLater(helperProc.destroy) }
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: {
+          root.helperFinished(text)
+          helperProc.streamDone = true
+          helperProc.maybeDestroy()
         }
       }
       onExited: { exited = true; maybeDestroy() }
@@ -376,6 +474,8 @@ Panel {
       implicitHeight: column.implicitHeight
       anchors.fill: parent
       blocked: keyField.activeFocus || root.hexFieldFocused
+      reorderable: !root.showKeyForm && root.listedDevices.length > 1
+      onReorderRequested: function(dy) { root.reorderDevice(dy) }
       onMoveRequested: function(dx, dy) {
         if (root.showKeyForm) return
         if (!root.cursorActive) { root.cursorActive = true; return }
@@ -383,11 +483,16 @@ Panel {
       }
       onActivateRequested: if (root.cursorActive && !root.showKeyForm) root.toggleExpanded(root.deviceAt(root.cursorIndex))
       onCloseRequested: root.close()
+      // X / Delete hide the selected device (or show it again when hidden).
+      onDeleteRequested: {
+        var d = root.deviceAt(root.cursorIndex)
+        if (d && root.cursorActive && !root.showKeyForm) root.setDeviceHidden(d, !Model.isHidden(d))
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         if (root.showKeyForm) return
         if (t === "r" || t === "R") root.refresh()
-        else if (t === "p" || t === "P" || t === " ") {
+        else if (t === "p" || t === "P") {
           var d = root.deviceAt(root.cursorIndex)
           if (d) { root.cursorActive = true; root.setPower(d, !Model.isOn(d)) }
         }
@@ -442,7 +547,7 @@ Panel {
 
                 ToggleSwitch {
                   id: allSwitch
-                  visible: root.devices.length > 0
+                  visible: root.activeDevices.length > 0
                   checked: root.anyOn
                   foreground: root.foreground
                   anchors.verticalCenter: parent.verticalCenter
@@ -561,13 +666,22 @@ Panel {
               horizontalAlignment: Text.AlignHCenter
             }
 
+            PlainText {
+              visible: root.loadedOnce && root.devices.length > 0 && root.listedDevices.length === 0
+              width: parent.width
+              text: strings.t("devices.allHidden")
+              color: root.dim
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+            }
+
             Column {
               id: deviceColumn
               width: parent.width
               spacing: Style.space(6)
 
               Repeater {
-                model: root.devices
+                model: root.listedDevices
                 DeviceCard {
                   required property var modelData
                   required property int index
@@ -589,7 +703,19 @@ Panel {
                 text: strings.t("hint")
                 color: root.dim
                 font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
+                wrapMode: Text.WordWrap
+              }
+
+              PanelActionButton {
+                id: showHiddenButton
+                visible: root.hiddenCount > 0
+                iconText: root.showHidden ? String.fromCodePoint(0xF0208) : String.fromCodePoint(0xF0209)   // eye / eye-off
+                tooltipText: root.showHidden
+                  ? strings.t("hidden.hide")
+                  : strings.tn("hidden.show", root.hiddenCount).arg(Commons.I18n.formatNumber(root.hiddenCount))
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.showHidden = !root.showHidden
               }
 
               PanelActionButton {
@@ -628,14 +754,18 @@ Panel {
     property int rowIndex: 0
     readonly property bool expanded: dev && root.expandedDevice === dev.device
     readonly property bool online: Model.isOnline(dev)
+    readonly property bool hidden: Model.isHidden(dev)
     readonly property bool busy: dev && (root.busyDevices[dev.device] || 0) > 0
     readonly property var controls: expanded ? Model.controlsFor(dev) : []
+    readonly property bool dragging: dev && root.dragDeviceId === dev.device
 
     spacing: Style.space(4)
+    opacity: dragging ? 0.4 : hidden ? 0.55 : 1
 
     CursorSurface {
       width: parent.width
-      hasCursor: root.cursorActive && root.cursorIndex === card.rowIndex
+      // While dragging, the highlight marks where the device will land.
+      hasCursor: root.dragDeviceId !== "" ? root.dragTarget === card.rowIndex : root.cursorActive && root.cursorIndex === card.rowIndex
       current: card.expanded
       foreground: root.foreground
       implicitHeight: rowLayout.implicitHeight + Style.spacing.rowPaddingX
@@ -672,6 +802,24 @@ Panel {
             opacity: 0.28
           }
 
+          // The icon is the handle for dragging the device up or down the list.
+          MouseArea {
+            anchors.fill: parent
+            anchors.margins: -Style.space(4)
+            hoverEnabled: true
+            preventStealing: true
+            cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+            onPressed: {
+              root.dragDeviceId = card.dev ? card.dev.device : ""
+              root.dragTarget = card.rowIndex
+            }
+            onPositionChanged: function(mouse) {
+              if (pressed) root.dragOver(mapToItem(card.parent, mouse.x, mouse.y).y)
+            }
+            onReleased: root.dropDevice()
+            onCanceled: { root.dragDeviceId = ""; root.dragTarget = -1 }
+          }
+
           PlainText {
             anchors.centerIn: parent
             text: Model.typeGlyph(card.dev ? card.dev.type : "")
@@ -694,7 +842,7 @@ Panel {
 
           PlainText {
             Layout.fillWidth: true
-            text: card.dev ? Model.deviceMeta(card.dev, strings.t) : ""
+            text: !card.dev ? "" : card.hidden ? strings.t("device.hidden") + " · " + Model.deviceMeta(card.dev, strings.t) : Model.deviceMeta(card.dev, strings.t)
             color: root.dim
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
@@ -753,6 +901,16 @@ Panel {
             return null
           }
         }
+      }
+
+      Button {
+        text: card.hidden ? strings.t("device.unhide") : strings.t("device.hide")
+        iconText: card.hidden ? String.fromCodePoint(0xF0208) : String.fromCodePoint(0xF0209)
+        bordered: true
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        fontSize: Style.font.bodySmall
+        onClicked: root.setDeviceHidden(card.dev, !card.hidden)
       }
     }
   }

@@ -70,5 +70,33 @@ class Cli(unittest.TestCase):
         self.assertFalse(os.path.exists(govee.CONFIG_FILE))
 
 
+    def test_hide_and_unhide(self):
+        self.assertEqual(self.run_cli("hide", "AA:BB"), {"ok": True, "device": "AA:BB", "hidden": True})
+        self.run_cli("hide", "CC:DD")
+        self.run_cli("hide", "AA:BB")
+        path = os.path.join(self.tmp, "omarchy", "govee", "hidden.json")
+        with open(path) as fh:
+            self.assertEqual(json.load(fh), {"hidden": ["CC:DD", "AA:BB"]})
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.run_cli("unhide", "AA:BB")
+        with open(path) as fh:
+            self.assertEqual(json.load(fh), {"hidden": ["CC:DD"]})
+        self.assertFalse(self.run_cli("hide", "bad id;")["ok"])
+
+    def test_forgetting_key_keeps_hidden_devices(self):
+        self.run_cli("hide", "AA:BB")
+        self.run_cli("clear-key")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "omarchy", "govee", "hidden.json")))
+
+
+    def test_set_order_and_apply(self):
+        self.assertEqual(self.run_cli("set-order", "B", "A", "B"), {"ok": True, "count": 2})
+        self.assertFalse(self.run_cli("set-order", "ok", "bad;id")["ok"])
+        self.assertFalse(self.run_cli("set-order")["ok"])
+        devs = [{"device": d} for d in ["A", "B", "C", "D"]]
+        ordered = govee.apply_order(devs, ["C", "A"])
+        self.assertEqual([d["device"] for d in ordered], ["C", "A", "B", "D"])
+
+
 if __name__ == "__main__":
     unittest.main()

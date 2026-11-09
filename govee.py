@@ -13,8 +13,12 @@ Commands:
   devices                         -> device list with current state
   control <sku> <device> <type> <instance> <value-json>
   scenes <sku> <device>           -> light scenes for one device
+  hide <device> / unhide <device> -> hide a device from the panel, or show it again
+  set-order <device>...           -> save the order devices are listed in
 
 The key lives in $XDG_CONFIG_HOME/omarchy/govee/config.json with mode 0600.
+Hidden device ids (hidden.json) and the list order (order.json) live beside it,
+so forgetting the key keeps them.
 GOVEE_API_KEY in the environment overrides the saved key.
 """
 
@@ -40,6 +44,9 @@ CONFIG_DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "omarchy", "govee"
 )
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+HIDDEN_FILE = os.path.join(CONFIG_DIR, "hidden.json")
+ORDER_FILE = os.path.join(CONFIG_DIR, "order.json")
+MAX_HIDDEN = 500
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9:._-]{1,64}$")
 SAFE_CAP_TYPE = re.compile(r"^devices\.capabilities\.[a-z_]{1,48}$")
@@ -83,20 +90,60 @@ def load_key():
         return ""
 
 
-def save_key(key):
+def write_private_json(path, data):
     os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".config.", dir=CONFIG_DIR)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=CONFIG_DIR)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"apiKey": key}, fh)
-        os.replace(tmp, CONFIG_FILE)
+            json.dump(data, fh)
+        os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
+
+
+def save_key(key):
+    write_private_json(CONFIG_FILE, {"apiKey": key})
+
+
+def load_id_list(path, key):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    ids = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(ids, list):
+        return []
+    return [i for i in ids if isinstance(i, str) and SAFE_ID.match(i)][:MAX_HIDDEN]
+
+
+def load_hidden():
+    return load_id_list(HIDDEN_FILE, "hidden")
+
+
+def load_order():
+    return load_id_list(ORDER_FILE, "order")
+
+
+def apply_order(devices, order):
+    """Saved order first; devices not in it keep Govee's order after them."""
+    rank = {dev_id: i for i, dev_id in enumerate(order)}
+    indexed = list(enumerate(devices))
+    indexed.sort(key=lambda p: (rank.get(p[1]["device"], len(rank) + p[0])))
+    return [d for _, d in indexed]
+
+
+def set_hidden(device, hidden):
+    ids = [i for i in load_hidden() if i != device]
+    if hidden:
+        ids.append(device)
+    write_private_json(HIDDEN_FILE, {"hidden": ids[-MAX_HIDDEN:]})
+    return ids
 
 
 def clear_key():
@@ -318,6 +365,10 @@ def cmd_devices():
         if str(exc) == "auth":
             fail("Govee rejected the API key", needsKey=True)
         fail(str(exc))
+    devices = apply_order(devices, load_order())
+    hidden = set(load_hidden())
+    for dev in devices:
+        dev["hidden"] = dev["device"] in hidden
     if devices:
         with ThreadPoolExecutor(max_workers=min(8, len(devices))) as pool:
             devices = list(pool.map(lambda d: fetch_state(key, d), devices))
@@ -389,6 +440,24 @@ def cmd_scenes(args):
     out({"ok": True, "device": args[1], "scenes": options[:MAX_OPTIONS]})
 
 
+def cmd_hide(args, hidden):
+    if len(args) != 1 or not SAFE_ID.match(args[0]):
+        fail("usage: %s <device>" % ("hide" if hidden else "unhide"))
+    set_hidden(args[0], hidden)
+    out({"ok": True, "device": args[0], "hidden": hidden})
+
+
+def cmd_set_order(args):
+    if not args or len(args) > MAX_HIDDEN or not all(SAFE_ID.match(a) for a in args):
+        fail("usage: set-order <device>...")
+    seen = []
+    for dev_id in args:
+        if dev_id not in seen:
+            seen.append(dev_id)
+    write_private_json(ORDER_FILE, {"order": seen})
+    out({"ok": True, "count": len(seen)})
+
+
 def main(argv):
     if not argv:
         fail("missing command")
@@ -407,6 +476,12 @@ def main(argv):
             cmd_control(args)
         elif cmd == "scenes":
             cmd_scenes(args)
+        elif cmd == "hide":
+            cmd_hide(args, True)
+        elif cmd == "unhide":
+            cmd_hide(args, False)
+        elif cmd == "set-order":
+            cmd_set_order(args)
         else:
             fail("unknown command: %s" % clip(cmd, 40))
     except GoveeError as exc:

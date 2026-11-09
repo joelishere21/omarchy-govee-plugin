@@ -262,11 +262,69 @@ function applyLocal(devices, deviceId, instance, value) {
   return next
 }
 
+function isHidden(dev) { return !!dev && dev.hidden === true }
+
+// Devices the panel lists: hidden ones only while "show hidden" is on.
+function listed(devices, showHidden) {
+  return (devices || []).filter(function(d) { return showHidden || !isHidden(d) })
+}
+
+// Devices that count toward the summary, the bar icon, and "all on/off".
+function active(devices) {
+  return (devices || []).filter(function(d) { return !isHidden(d) })
+}
+
+function hiddenCount(devices) {
+  return (devices || []).length - active(devices).length
+}
+
+function setHidden(devices, deviceId, hidden) {
+  return (devices || []).map(function(d) {
+    if (d.device !== deviceId) return d
+    var copy = {}
+    for (var k in d) copy[k] = d[k]
+    copy.hidden = !!hidden
+    return copy
+  })
+}
+
+// Move a device to position `to` of the list the user sees (hidden devices
+// left out unless shown) and return the full, reordered device array. Hidden
+// devices the user can't see keep their place relative to their neighbors.
+function moveDevice(devices, showHidden, deviceId, to) {
+  var all = (devices || []).slice()
+  var shown = listed(all, showHidden)
+  var from = -1
+  for (var i = 0; i < shown.length; i++) if (shown[i].device === deviceId) from = i
+  if (from < 0 || shown.length < 2) return all
+  to = clamp(to, 0, shown.length - 1)
+  if (to === from) return all
+  var target = shown[to]
+  var moving = all.splice(all.indexOf(shown[from]), 1)[0]
+  var at = all.indexOf(target)
+  all.splice(to > from ? at + 1 : at, 0, moving)
+  return all
+}
+
+// Sort by a list of device ids; devices not in it follow in their own order.
+function applyOrder(devices, order) {
+  var rank = {}
+  for (var i = 0; i < (order || []).length; i++) rank[order[i]] = i
+  var n = (order || []).length
+  return (devices || []).map(function(d, i) { return { d: d, k: rank[d.device] !== undefined ? rank[d.device] : n + i } })
+    .sort(function(a, b) { return a.k - b.k })
+    .map(function(p) { return p.d })
+}
+
+function deviceIds(devices) {
+  return (devices || []).map(function(d) { return d.device })
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     typeGlyph: typeGlyph, findCap: findCap, hasPower: hasPower, isOn: isOn, isOnline: isOnline,
     humanize: humanize, controlsFor: controlsFor, controlValue: controlValue, deviceMeta: deviceMeta,
     countOn: countOn, applyLocal: applyLocal, intToHex: intToHex, hexToInt: hexToInt, rgbToInt: rgbToInt,
-    sameValue: sameValue, workModeChoices: workModeChoices, SWATCHES: SWATCHES
+    sameValue: sameValue, isHidden: isHidden, listed: listed, active: active, hiddenCount: hiddenCount, setHidden: setHidden, moveDevice: moveDevice, applyOrder: applyOrder, deviceIds: deviceIds, workModeChoices: workModeChoices, SWATCHES: SWATCHES
   }
 }

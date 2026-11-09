@@ -25,6 +25,12 @@
   "device.stateUnavailable": "State unavailable",
   "device.noControls": "No adjustable controls for this device.",
   "device.power": "Power (P)",
+  "device.hide": "Hide device (X)",
+  "device.unhide": "Show device again (X)",
+  "device.hidden": "Hidden",
+  "devices.allHidden": "All devices are hidden. Use the eye button below to show them.",
+  "hidden.show": { "one": "Show %1 hidden device", "other": "Show %1 hidden devices" },
+  "hidden.hide": "Hide hidden devices",
   "control.brightness": "Brightness",
   "control.colorRgb": "Color",
   "control.colorTemperatureK": "Color temperature",
@@ -47,5 +53,5 @@
   "scenes.loading": "Loading scenes…",
   "scenes.none": "No scenes available",
   "error.generic": "Something went wrong talking to Govee.",
-  "hint": "↑↓ move · Enter expand · P power · R refresh"
+  "hint": "↑↓\u00a0move · Ctrl+↑↓\u00a0reorder · Enter\u00a0expand · P\u00a0power · X\u00a0hide · R\u00a0refresh"
 }
