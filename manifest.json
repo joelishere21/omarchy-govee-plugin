@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "id": "govee",
+  "name": "Govee",
+  "version": "1.0.0",
+  "author": "Joel",
+  "license": "MIT",
+  "description": "Control your Govee lights, plugs, and appliances from the Omarchy bar using your Govee API key.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Govee",
+    "description": "Turn Govee devices on and off, set brightness, color, color temperature, modes, and scenes.",
+    "category": "Home",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30,
+      "backgroundRefresh": false,
+      "backgroundRefreshSec": 300
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval while open (seconds)",
+        "min": 10,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 30
+      },
+      {
+        "key": "backgroundRefresh",
+        "type": "boolean",
+        "label": "Refresh in the background",
+        "defaultValue": false,
+        "description": "Poll the Govee cloud while the panel is closed so the bar icon reflects whether any device is on. Each refresh uses one request per device against Govee's daily limit."
+      },
+      {
+        "key": "backgroundRefreshSec",
+        "type": "integer",
+        "label": "Background refresh interval (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 300
+      }
+    ]
+  }
+}
